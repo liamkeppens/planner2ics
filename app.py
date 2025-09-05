@@ -10,22 +10,22 @@ from dateutil.parser import parse as dtparse
 from icalendar import Calendar, Event, Alarm
 from unidecode import unidecode
 
+# ---------- App meta ----------
 st.set_page_config(page_title="Planner → ICS", page_icon="🗓️", layout="centered")
 st.title("🗓️ Planner → ICS generator")
-st.caption("Upload je planning (PDF/CSV/Excel) en download een .ics. Titel = Dagdienst/Nachtdienst. Reminders naar keuze.")
+st.caption("Upload je planning (PDF/CSV/Excel) en download een .ics. Dag-/nachtdienst titels, instelbare reminders, en tijdzone-fix.")
 
-# ---------- Helpers ----------
+# ---------- Regex/const ----------
 MONTHS_NL = {
     "JANUARI": 1, "FEBRUARI": 2, "MAART": 3, "APRIL": 4, "MEI": 5, "JUNI": 6,
     "JULI": 7, "AUGUSTUS": 8, "SEPTEMBER": 9, "OKTOBER": 10, "NOVEMBER": 11, "DECEMBER": 12,
 }
-
-# Ook de en-dash “–” toelaten
-TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})")
+TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})")  # accepteert dash én en-dash
 DAY_RE = re.compile(r"(^|\s)(\d{1,2})\s*(MA|DI|WO|DO|VR|ZA|ZO)\b", re.IGNORECASE)
 PERIODE_RE = re.compile(r"PERIODE\s*:\s*([A-Z]+)\s+(\d{4})", re.IGNORECASE)
-ADDRESS_RE = re.compile(r"\b(\d{4})\b.*")
+ADDRESS_RE = re.compile(r"\b(\d{4})\b.*")  # simpele postal-code heuristic
 
+# ---------- Helpers ----------
 def detect_month_year(text: str):
     for line in text.splitlines():
         m = PERIODE_RE.search(unidecode(line.upper()))
@@ -56,14 +56,11 @@ def build_uid(day: int, start: str, end: str, title: str, loc: str) -> str:
     raw = f"{day}-{start}-{end}-{title}-{loc}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest() + "@planner2ics"
 
-def add_days_if_cross_midnight(start_dt: datetime, end_hhmm: str) -> datetime:
-    eh, em = map(int, end_hhmm.split(":"))
-    end_dt = start_dt.replace(hour=eh, minute=em)
-    if end_dt <= start_dt:
-        end_dt += timedelta(days=1)
-    return end_dt
-
 def parse_pdf_schedule(file_bytes: bytes):
+    """
+    Parse PDF naar rijen met:
+    {date, start, end, title, location, notes}
+    """
     lines = pdf_to_lines(file_bytes)
     full_text = "\n".join(lines)
     month, year = detect_month_year(full_text)
@@ -76,24 +73,23 @@ def parse_pdf_schedule(file_bytes: bytes):
     for i, line in enumerate(lines):
         u = unidecode(line)
 
+        # locatie/adres blok (regel met postcode + vorige regel met straat)
         if ADDRESS_RE.search(u):
             prev = unidecode(lines[i-1]) if i > 0 else ""
             current_loc = (prev + "\n" + u).strip()
 
+        # dag + tijdsbereik
         if DAY_RE.search(u) and TIME_RE.search(u):
             if "OFF" in u.upper():
                 continue
             day = int(DAY_RE.search(u).group(2))
             start_h, end_h = normalize_time(TIME_RE.search(u).group(1)), normalize_time(TIME_RE.search(u).group(2))
-
             try:
                 start_dt = datetime(year, month, day, int(start_h[:2]), int(start_h[3:]))
             except ValueError:
-                continue
-
+                continue  # skip ongeldige datums
             title = classify_shift(start_h)
             loc = current_loc or ""
-
             results.append({
                 "date": start_dt.date().isoformat(),
                 "start": start_h,
@@ -104,7 +100,12 @@ def parse_pdf_schedule(file_bytes: bytes):
             })
     return results
 
-def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit: str, force_local_times: bool, no_reminder: bool) -> bytes:
+def df_to_ics(df: pd.DataFrame,
+              tz_name: str,
+              reminder_value: int,
+              reminder_unit: str,
+              force_local_times: bool,
+              no_reminder: bool) -> bytes:
     cal = Calendar()
     cal.add("prodid", "-//Planner→ICS//NL")
     cal.add("version", "2.0")
@@ -117,13 +118,12 @@ def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit
         eh, em = map(int, str(row["end"]).split(":"))
 
         if force_local_times:
-            # “floating” tijd: geen TZID → Google neemt exact de kloktijd over
+            # floating times: géén TZ → Google neemt exact over
             start_dt = datetime(date.year, date.month, date.day, sh, sm)
             end_dt = datetime(date.year, date.month, date.day, eh, em)
             if end_dt <= start_dt:
                 end_dt += timedelta(days=1)
         else:
-            # TZ-bewust
             start_dt = datetime(date.year, date.month, date.day, sh, sm, tzinfo=tzinfo)
             end_dt = start_dt.replace(hour=eh, minute=em)
             if end_dt <= start_dt:
@@ -144,46 +144,47 @@ def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit
         ev.add("uid", build_uid(date.day, row["start"], row["end"], title, location))
         ev.add("dtstamp", datetime.utcnow())
 
-        # Reminder met timedelta (negatief = vooraf)
+        # alleen VALARM toevoegen als reminders aan staan
         if not no_reminder:
             alarm = Alarm()
             alarm.add("action", "DISPLAY")
             alarm.add("description", f"Herinnering: {title} — {location}" if location else f"Herinnering: {title}")
+
             if reminder_unit == "dagen":
                 delta = timedelta(days=int(reminder_value))
             elif reminder_unit == "uren":
                 delta = timedelta(hours=int(reminder_value))
             else:
                 delta = timedelta(minutes=int(reminder_value))
-            alarm.add("trigger", -delta)
+
+            alarm.add("trigger", -delta)  # negatief = vóór aanvang
             ev.add_component(alarm)
 
         cal.add_component(ev)
 
     return cal.to_ical()
 
-# ---------- UI ----------
+# ---------- Sidebar instellingen ----------
 with st.sidebar:
     st.header("Instellingen")
     tz_name = st.selectbox(
-        "Tijdzone (alleen relevant als je GEEN 'lokale tijden' forceert)",
+        "Tijdzone (alleen relevant als je géén 'lokale tijden' forceert)",
         options=["Europe/Brussels", "Europe/Amsterdam", "Europe/Berlin", "Europe/Paris", "UTC", "America/New_York"],
         index=0,
     )
     r_unit = st.selectbox("Herinnering eenheid", ["dagen", "uren", "minuten"], index=0)
     r_value = st.number_input("Herinnering hoeveel van tevoren", min_value=0, max_value=30, value=1, step=1)
-    force_local_times = st.checkbox("Forceer lokale tijden (zonder tijdzone) – aan te raden", value=True)
-    no_reminder = st.checkbox("Geen herinnering toevoegen", value=False)
+    force_local_times = st.checkbox("Forceer lokale tijden (zonder tijdzone) – aanbevolen", value=True)
+    # Jouw wens: standaard géén herinnering
+    no_reminder = st.checkbox("Geen herinnering toevoegen", value=True)
 
-
+# ---------- Upload ----------
 st.subheader("1) Upload je planning (PDF, CSV of Excel)")
 uploaded = st.file_uploader("Kies bestand", type=["pdf", "csv", "xlsx"])
-
 parsed_rows = None
 
 if uploaded:
     name = uploaded.name.lower()
-
     if name.endswith(".pdf"):
         try:
             data = uploaded.read()
@@ -197,7 +198,8 @@ if uploaded:
         parsed_rows = pd.read_excel(uploaded)
 
     if parsed_rows is not None and not parsed_rows.empty:
-        st.subheader("2) Controleer/Map kolommen")
+        # ---------- Mapping ----------
+        st.subheader("2) Controleer / map kolommen")
         cols = parsed_rows.columns.tolist()
         date_col = st.selectbox("Datum kolom", options=cols, index=cols.index("date") if "date" in cols else 0)
         start_col = st.selectbox("Starttijd kolom", options=cols, index=cols.index("start") if "start" in cols else 1)
@@ -206,7 +208,6 @@ if uploaded:
         loc_col = st.selectbox("Locatie kolom", options=["(geen)"] + cols, index=(cols.index("location") + 1) if "location" in cols else 0)
         notes_col = st.selectbox("Notities kolom", options=["(geen)"] + cols, index=(cols.index("notes") + 1) if "notes" in cols else 0)
 
-        # Normaliseren
         norm = pd.DataFrame()
         norm["date"] = parsed_rows[date_col]
         norm["start"] = parsed_rows[start_col]
@@ -215,7 +216,7 @@ if uploaded:
         norm["location"] = parsed_rows[loc_col] if loc_col != "(geen)" else ""
         norm["notes"] = parsed_rows[notes_col] if notes_col != "(geen)" else ""
 
-        # Auto titel
+        # Titel autofill
         def _auto_title(row):
             t = str(row.get("title", "")).strip()
             if t:
@@ -234,7 +235,7 @@ if uploaded:
         norm["start"] = norm["start"].map(_norm_time)
         norm["end"] = norm["end"].map(_norm_time)
 
-        # ---------- DEBUG-TABEL ----------
+        # ---------- Debug tabel ----------
         st.subheader("✅ Gevonden diensten (check de tijden vóór export)")
         st.dataframe(norm[["date", "start", "end", "title", "location"]].head(50), use_container_width=True)
 
@@ -244,10 +245,24 @@ if uploaded:
         else:
             st.warning(f"Export gebruikt tijdzone: {tz_name}. Als je kalender een andere TZ heeft, kunnen tijden verschuiven.")
 
+        # Status over herinneringen
+        if no_reminder:
+            st.warning("⚠️ Er worden géén herinneringen toegevoegd aan dit .ics-bestand.")
+        else:
+            unit_map = {"dagen": "dag", "uren": "uur", "minuten": "minuut"}
+            unit_label = unit_map.get(r_unit, r_unit)
+            amount = int(r_value)
+            if unit_label == "uur":
+                unit_text = "uur" if amount == 1 else "uren"
+            else:
+                unit_text = unit_label if amount == 1 else unit_label + "en"
+            st.success(f"✅ Herinneringen actief: {amount} {unit_text} vóór aanvang.")
+
+        # ---------- Export ----------
         if st.button("Maak .ics"):
             ics_bytes = df_to_ics(norm, tz_name, int(r_value), r_unit, force_local_times, no_reminder)
             try:
-                first_date = dtparse(str(norm.iloc[0]["date"]))
+                first_date = pd.to_datetime(norm["date"]).min()
                 fname = f"planning_{first_date.year}_{first_date.month:02d}.ics"
             except Exception:
                 fname = "planning.ics"
@@ -258,8 +273,14 @@ if uploaded:
                 file_name=fname,
                 mime="text/calendar",
             )
+
+            # bevestiging onder de knop
+            if no_reminder:
+                st.info("⚠️ Dit bestand bevat géén herinneringen.")
+            else:
+                st.info(f"✅ Herinneringen toegevoegd volgens instelling hierboven.")
     else:
         st.info("Geen rijen gevonden. Controleer of je bestand duidelijk datum en tijden bevat.")
 
 st.markdown("---")
-st.caption("Tip: nachtdiensten (eind vóór start) worden automatisch naar de volgende dag verlengd. Reminders: kies dagen/uren/minuten vooraf.")
+st.caption("Tip: nachtdiensten (eind vóór start) worden automatisch naar de volgende dag verlengd. Gebruik 'Forceer lokale tijden' om verschuivingen te voorkomen.")
