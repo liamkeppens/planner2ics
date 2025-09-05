@@ -12,8 +12,7 @@ Met deze tool kan je je werkplanning (PDF, CSV of Excel) omzetten naar een `.ics
 - ✅ Tijden zonder tijdzone (aanbevolen) of met gekozen tijdzone
 
 ## 🚀 Gebruik
-1. Ga naar [https://planner.uploadplanning.be](https://planner.uploadplanning.be)  
-   (of naar de Streamlit Cloud link van de app).
+1. Ga naar [https://uploadplanning.be] 
 2. Upload je planning (PDF, CSV of Excel).
 3. Bekijk de herkende diensten in de tabel.
 4. Kies of je herinneringen wil (of standaard geen).
@@ -32,7 +31,7 @@ Met deze tool kan je je werkplanning (PDF, CSV of Excel) omzetten naar een `.ics
 ## 📦 Installatie (lokaal)
 Voor developers of self-hosting:
 ```bash
-git clone https://github.com/<jouw-username>/planner2ics.git
+git clone https://github.com/liamkeppens/planner2ics.git
 cd planner2ics
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
