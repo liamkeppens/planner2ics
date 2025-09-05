@@ -104,7 +104,7 @@ def parse_pdf_schedule(file_bytes: bytes):
             })
     return results
 
-def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit: str, force_local_times: bool) -> bytes:
+def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit: str, force_local_times: bool, no_reminder: bool) -> bytes:
     cal = Calendar()
     cal.add("prodid", "-//Planner→ICS//NL")
     cal.add("version", "2.0")
@@ -145,17 +145,18 @@ def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit
         ev.add("dtstamp", datetime.utcnow())
 
         # Reminder met timedelta (negatief = vooraf)
-        alarm = Alarm()
-        alarm.add("action", "DISPLAY")
-        alarm.add("description", f"Herinnering: {title} — {location}" if location else f"Herinnering: {title}")
-        if reminder_unit == "dagen":
-            delta = timedelta(days=int(reminder_value))
-        elif reminder_unit == "uren":
-            delta = timedelta(hours=int(reminder_value))
-        else:
-            delta = timedelta(minutes=int(reminder_value))
-        alarm.add("trigger", -delta)
-        ev.add_component(alarm)
+        if not no_reminder:
+            alarm = Alarm()
+            alarm.add("action", "DISPLAY")
+            alarm.add("description", f"Herinnering: {title} — {location}" if location else f"Herinnering: {title}")
+            if reminder_unit == "dagen":
+                delta = timedelta(days=int(reminder_value))
+            elif reminder_unit == "uren":
+                delta = timedelta(hours=int(reminder_value))
+            else:
+                delta = timedelta(minutes=int(reminder_value))
+            alarm.add("trigger", -delta)
+            ev.add_component(alarm)
 
         cal.add_component(ev)
 
@@ -172,6 +173,8 @@ with st.sidebar:
     r_unit = st.selectbox("Herinnering eenheid", ["dagen", "uren", "minuten"], index=0)
     r_value = st.number_input("Herinnering hoeveel van tevoren", min_value=0, max_value=30, value=1, step=1)
     force_local_times = st.checkbox("Forceer lokale tijden (zonder tijdzone) – aan te raden", value=True)
+    no_reminder = st.checkbox("Geen herinnering toevoegen", value=False)
+
 
 st.subheader("1) Upload je planning (PDF, CSV of Excel)")
 uploaded = st.file_uploader("Kies bestand", type=["pdf", "csv", "xlsx"])
@@ -242,7 +245,7 @@ if uploaded:
             st.warning(f"Export gebruikt tijdzone: {tz_name}. Als je kalender een andere TZ heeft, kunnen tijden verschuiven.")
 
         if st.button("Maak .ics"):
-            ics_bytes = df_to_ics(norm, tz_name, int(r_value), r_unit, force_local_times)
+            ics_bytes = df_to_ics(norm, tz_name, int(r_value), r_unit, force_local_times, no_reminder)
             try:
                 first_date = dtparse(str(norm.iloc[0]["date"]))
                 fname = f"planning_{first_date.year}_{first_date.month:02d}.ics"
