@@ -69,8 +69,9 @@ def parse_pdf_schedule(file_bytes: bytes):
         u = unidecode(line)
 
         if ADDRESS_RE.search(u):
-            prev = unidecode(lines[i-1]) if i > 0 else ""
-            current_loc = (prev + "\n" + u).strip()
+    # gebruik alleen de regel met postcode, niet de vorige of andere tekst
+    current_loc = u.strip()
+
 
         if DAY_RE.search(u) and TIME_RE.search(u):
             if "OFF" in u.upper():
