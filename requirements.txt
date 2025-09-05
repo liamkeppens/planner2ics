@@ -1,0 +1,8 @@
+streamlit
+pandas
+python-dateutil
+icalendar
+pytz
+pdfplumber
+unidecode
+openpyxl
