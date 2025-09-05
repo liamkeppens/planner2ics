@@ -69,7 +69,7 @@ def parse_pdf_schedule(file_bytes: bytes):
     if not month or not year:
         raise ValueError("Kon 'Periode : <MAAND> <JAAR>' niet vinden in de PDF.")
 
-    results, current_loc = [], ""
+    results, current_loc = [], None
 
     for i, line in enumerate(lines):
         u = unidecode(line).strip()
@@ -80,24 +80,39 @@ def parse_pdf_schedule(file_bytes: bytes):
             continue
 
         # Regel met dag + tijdsbereik
+        # ... binnen de for-lus over lines:
         if DAY_RE.search(u) and TIME_RE.search(u):
             if "OFF" in u.upper():
                 continue
             try:
                 day = int(DAY_RE.search(u).group(2))
-                start_h, end_h = normalize_time(TIME_RE.search(u).group(1)), normalize_time(TIME_RE.search(u).group(2))
+                start_h = normalize_time(TIME_RE.search(u).group(1))
+                end_h   = normalize_time(TIME_RE.search(u).group(2))
                 _ = datetime(year, month, day)  # validatie
             except Exception:
                 continue
+
+            # locatie bepalen
+            loc = current_loc  # wat we tot nu toe kennen
+            if not loc:
+                # 🔎 kijk vooruit (max 8 regels) voor de eerste echte adresregel
+                for j in range(1, 9):
+                    if i + j < len(lines):
+                        uj = unidecode(lines[i + j]).strip()
+                        if "PERIODE" not in uj.upper() and ADDRESS_RE.match(uj):
+                            loc = uj
+                            current_loc = uj  # onthouden voor volgende diensten
+                            break
 
             results.append({
                 "date": f"{year:04d}-{month:02d}-{day:02d}",
                 "start": start_h,
                 "end":   end_h,
                 "title": classify_shift(start_h),
-                "location": current_loc,   # enkel de adresregel
+                "location": loc or "",   # nu krijgt de 1e dienst ook het adres
                 "notes": "",
             })
+
     return results
 
 # --- Automatische kolomherkenning voor CSV/XLSX ---
