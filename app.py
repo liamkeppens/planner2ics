@@ -70,7 +70,7 @@ def parse_pdf_schedule(file_bytes: bytes):
 
         if ADDRESS_RE.search(u):
     # gebruik alleen de regel met postcode, niet de vorige of andere tekst
-    current_loc = u.strip()
+            current_loc = u.strip()
 
 
         if DAY_RE.search(u) and TIME_RE.search(u):
