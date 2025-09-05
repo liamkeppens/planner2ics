@@ -6,24 +6,26 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
 from dateutil import tz
-from dateutil.parser import parse as dtparse
 from icalendar import Calendar, Event, Alarm
 from unidecode import unidecode
 
 # ---------- App meta ----------
 st.set_page_config(page_title="Planner → ICS", page_icon="🗓️", layout="centered")
 st.title("🗓️ Planner → ICS generator")
-st.caption("Upload je planning (PDF/CSV/Excel) en download een .ics. Dag-/nachtdienst titels, instelbare reminders, en tijdzone-fix.")
+st.caption("Upload je planning (PDF/CSV/Excel) en download een .ics. Dag-/nachtdienst-titels, (optionele) reminders en nette tijden.")
 
 # ---------- Regex/const ----------
 MONTHS_NL = {
     "JANUARI": 1, "FEBRUARI": 2, "MAART": 3, "APRIL": 4, "MEI": 5, "JUNI": 6,
     "JULI": 7, "AUGUSTUS": 8, "SEPTEMBER": 9, "OKTOBER": 10, "NOVEMBER": 11, "DECEMBER": 12,
 }
-TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})")  # dash & en-dash
-DAY_RE = re.compile(r"(^|\s)(\d{1,2})\s*(MA|DI|WO|DO|VR|ZA|ZO)\b", re.IGNORECASE)
+TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})")   # dash & en-dash
+DAY_RE  = re.compile(r"(^|\s)(\d{1,2})\s*(MA|DI|WO|DO|VR|ZA|ZO)\b", re.IGNORECASE)
 PERIODE_RE = re.compile(r"PERIODE\s*:\s*([A-Z]+)\s+(\d{4})", re.IGNORECASE)
-ADDRESS_RE = re.compile(r"\b(\d{4})\b.*")  # simpele postcode-heuristiek
+
+# Adresregels zoals: "KANUNNIK DE MEYERLAAN 23, 9220 HAMME"
+# (vereist komma, geldige postcode 1000–9999 en een stadsnaam)
+ADDRESS_RE = re.compile(r".+,\s*[1-9]\d{3}\s+[A-Za-zÀ-ÿ\- ]+$")
 
 # ---------- Helpers ----------
 def detect_month_year(text: str):
@@ -31,7 +33,10 @@ def detect_month_year(text: str):
         m = PERIODE_RE.search(unidecode(line.upper()))
         if m:
             month_name, year = m.group(1), int(m.group(2))
-            month = MONTHS_NL.get(month_name)
+            month = {
+                "JANUARI":1,"FEBRUARI":2,"MAART":3,"APRIL":4,"MEI":5,"JUNI":6,
+                "JULI":7,"AUGUSTUS":8,"SEPTEMBER":9,"OKTOBER":10,"NOVEMBER":11,"DECEMBER":12,
+            }.get(month_name)
             if month:
                 return month, year
     return None, None
@@ -64,37 +69,40 @@ def parse_pdf_schedule(file_bytes: bytes):
     if not month or not year:
         raise ValueError("Kon 'Periode : <MAAND> <JAAR>' niet vinden in de PDF.")
 
-    results, current_loc = [], None
+    results, current_loc = [], ""
+
     for i, line in enumerate(lines):
-        u = unidecode(line)
+        u = unidecode(line).strip()
 
-        if ADDRESS_RE.search(u):
-    # gebruik alleen de regel met postcode, niet de vorige of andere tekst
-            current_loc = u.strip()
+        # Zet locatie ALLEEN als het een échte adresregel is (en geen 'Periode ...')
+        if "PERIODE" not in u.upper() and ADDRESS_RE.match(u):
+            current_loc = u
+            continue
 
-
+        # Regel met dag + tijdsbereik
         if DAY_RE.search(u) and TIME_RE.search(u):
             if "OFF" in u.upper():
                 continue
-            day = int(DAY_RE.search(u).group(2))
-            start_h, end_h = normalize_time(TIME_RE.search(u).group(1)), normalize_time(TIME_RE.search(u).group(2))
             try:
-                start_dt = datetime(year, month, day, int(start_h[:2]), int(start_h[3:]))
-            except ValueError:
+                day = int(DAY_RE.search(u).group(2))
+                start_h, end_h = normalize_time(TIME_RE.search(u).group(1)), normalize_time(TIME_RE.search(u).group(2))
+                _ = datetime(year, month, day)  # validatie
+            except Exception:
                 continue
+
             results.append({
-                "date": start_dt.date().isoformat(),
+                "date": f"{year:04d}-{month:02d}-{day:02d}",
                 "start": start_h,
-                "end": end_h,
+                "end":   end_h,
                 "title": classify_shift(start_h),
-                "location": current_loc or "",
+                "location": current_loc,   # enkel de adresregel
                 "notes": "",
             })
     return results
 
 # --- Automatische kolomherkenning voor CSV/XLSX ---
 def _norm(s: str) -> str:
-    return re.sub(r"[^a-z]", "", str(s).lower())
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 COLUMN_ALIASES = {
     "date": {"date", "datum", "dag", "day"},
@@ -107,7 +115,7 @@ COLUMN_ALIASES = {
 def guess_columns(df: pd.DataFrame):
     cols = list(df.columns)
     norm_map = {_norm(c): c for c in cols}
-    result = {}
+    res = {}
     for want, aliases in COLUMN_ALIASES.items():
         chosen = None
         for a in aliases:
@@ -115,8 +123,8 @@ def guess_columns(df: pd.DataFrame):
                 chosen = norm_map[a]; break
         if not chosen and want in norm_map:
             chosen = norm_map[want]
-        result[want] = chosen
-    return result
+        res[want] = chosen
+    return res
 
 def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit: str,
               force_local_times: bool, no_reminder: bool) -> bytes:
@@ -125,10 +133,12 @@ def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit
     cal.add("version", "2.0")
 
     tzinfo = tz.gettz(tz_name)
+
     for _, row in df.iterrows():
         date = pd.to_datetime(str(row["date"]), errors="coerce")
         if pd.isna(date):
             continue
+        # tijden
         sh, sm = map(int, str(row["start"]).split(":"))
         eh, em = map(int, str(row["end"]).split(":"))
 
@@ -154,6 +164,7 @@ def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit
         ev.add("uid", build_uid(date.day, row["start"], row["end"], title, location))
         ev.add("dtstamp", datetime.utcnow())
 
+        # (Optionele) reminder
         if not no_reminder:
             alarm = Alarm()
             alarm.add("action", "DISPLAY")
@@ -164,7 +175,7 @@ def df_to_ics(df: pd.DataFrame, tz_name: str, reminder_value: int, reminder_unit
                 delta = timedelta(hours=int(reminder_value))
             else:
                 delta = timedelta(minutes=int(reminder_value))
-            alarm.add("trigger", -delta)  # negatief = vóór aanvang
+            alarm.add("trigger", -delta)   # negatief = vóór aanvang
             ev.add_component(alarm)
 
         cal.add_component(ev)
@@ -194,8 +205,7 @@ if uploaded:
     if name.endswith(".pdf"):
         try:
             data = uploaded.read()
-            rows = parse_pdf_schedule(data)
-            parsed_rows = pd.DataFrame(rows)
+            parsed_rows = pd.DataFrame(parse_pdf_schedule(data))
         except Exception as e:
             st.error(f"Kon PDF niet parsen: {e}")
     elif name.endswith(".csv"):
@@ -213,14 +223,14 @@ if uploaded:
             col = g.get(name)
             return parsed_rows[col] if col in parsed_rows.columns else default
 
-        norm["date"] = pick("date")
-        norm["start"] = pick("start")
-        norm["end"] = pick("end")
-        norm["title"] = pick("title", "")
+        norm["date"]     = pick("date")
+        norm["start"]    = pick("start")
+        norm["end"]      = pick("end")
+        norm["title"]    = pick("title", "")
         norm["location"] = pick("location", "")
-        norm["notes"] = pick("notes", "")
+        norm["notes"]    = pick("notes", "")
 
-        # Auto titel & tijdformaat
+        # Titel en tijden opschonen
         def _auto_title(row):
             t = str(row.get("title", "")).strip()
             if t: return t
@@ -264,7 +274,6 @@ if uploaded:
         else:
             st.warning(f"Export gebruikt tijdzone: {tz_name}. Bij afwijkende kalender-TZ kunnen tijden verschuiven.")
 
-        # Status over herinneringen
         if no_reminder:
             st.warning("⚠️ Er worden géén herinneringen toegevoegd aan dit .ics-bestand.")
         else:
